@@ -11,13 +11,9 @@ import numpy as np
 from PIL import Image
 from threading import *
 
-
-#Don't init camera on startup
-tf = False
-
 debug = False
 
-#To handle the .so file not found error
+#To make sure that the apriltag package is in the path
 def _get_demo_searchpath():
     
     return [
@@ -25,6 +21,9 @@ def _get_demo_searchpath():
         os.path.join(os.getcwd(), '../build/lib')
     ]
 
+
+"""Function grabs the serial port mutex lock and sends [data] to 
+the [ser_port]"""
 def send_message(data, ser_port, serialLock):
     #first grab mutex lock
     serialLock.acquire()
@@ -39,6 +38,26 @@ def send_message(data, ser_port, serialLock):
     #release the mutex lock
     serialLock.release()
 
+
+
+"""[get_distance] receives the command from the host computer regarding the 
+[num_points] to sample from the image, and [height] is the angle in degrees to 
+that the depth reading. [depth_frame] is returned from the camera, in a 640*480
+array of distance data. [num_points] is taken at regular intervals across a 
+horizontal row of the depth image. The left and the right-most points of the 
+image is always sampled, and the remaining points are interpolated across the 
+row. The distance returned is after taking average of 16 points in the region 
+specified (4*4 pixels). 
+
+
+
+Requires (enforced by the MATLAB code): 
+
+	- 2<=[num_points]<=9
+
+	- 1<=[height]<=40
+
+"""
 def get_distance(depth_frame, num_points, height):
     ret = ""
     pix_per_deg = 12
@@ -47,7 +66,7 @@ def get_distance(depth_frame, num_points, height):
     for j in range(num_points):
         start = j*pix_per_interval
         sum = 0
-        for y in range(height*pix_per_deg-4, height*pix_per_deg):
+        for y in range((40-height)*pix_per_deg-4, (40-height)*pix_per_deg):
            for k in range(start, start+4):
                sum +=depth_frame.get_distance(k, y)
         avg = sum/16
@@ -57,6 +76,15 @@ def get_distance(depth_frame, num_points, height):
         ret += " "
     return ret
 
+
+
+
+
+"""[get_tag] scans the current camera video image and returns the apriltag
+information if any is detected. [color_frame] is the RGB image captured by the
+RealSense camera, [depth_frame] is the current depth frame captured by the 
+camera. [params] is the RealSense camera parameters necessary for the apriltag 
+package to calculate the pose of the tag in view."""
 def get_tag(color_frame, depth_frame, params):
     ret = ""
 	#Initialize apriltage detector
@@ -87,9 +115,13 @@ def get_tag(color_frame, depth_frame, params):
         ret += " "
         dist_to_center = depth_frame.get_distance(int(x), int(y))
         print( 'Detection {} of {}:'.format(i+1, num_detections))
-       # ret += 'Detection {} of {}:'.format(i+1, num_detections)
-       # ret += str(dist_to_center)
-       # ret += " "
+		#Pose of the apriltags in camera view is returned from the apriltag 
+		#package as a homogeneous transform matrix. The tag position in the H 
+		#matrix is the (x, y, z) position of the center of the tag with respect 
+		#to the left center of the camera frame. 
+		# The third argument into the detector.detection_pose() function is the 
+		# size of the apriltags used in meters. The pose calculations are very
+		# sensitive to this value
         pose, e0, e1 = detector.detection_pose(detection, params, 0.165)
         z_dist = pose[2, 3]
         x_dist = pose[0, 3]-math.tan(fov)*z_dist
@@ -104,22 +136,25 @@ def get_tag(color_frame, depth_frame, params):
         print("pose of the tag is: ")
         print(pose)
         print(detection.tostring(indent=2))
-		#ret += "Tag ID is: "
-		#ret += str(ind)
-       # ret.append(detection.tostring(indent=2))
+
         
         print('Distance to center of apriltag is: ')
-       # ret += 'Distance to center of apriltag is: '
         print(dist_to_center)
         
         i+=1
     return ret
-	#Compute and print the distance to center of apriltag
 
 
+"""[main()] first establishes connection with host computer. Once the TCPIP
+	connection is established, the function sets the RealSense camera stream
+	parameters and starts the camera stream pipeline. Any exceptions caught 
+
+	in this function would cause the program to terminate. 
+	Once all connections are set and the camera started, the function listens
+	to commands from the host computer MATLAB toolbox and executes them 
+	accordingly. """
 def main():
-
-    #first establish connection with host computer
+	# set the static IP address of this Python server
     TCP_IP = '199.168.1.100'
     TCP_PORT = 8865
     BUFFER_SIZE = 128
@@ -172,7 +207,10 @@ def main():
             data = (conn.recv(BUFFER_SIZE))
             print ("received data:")
             print (data)
+			# Command received from the host computer, matches with each of the 
+			# following cases to handle accordingly. 
             if data[:4] == b'dist':
+			# Case where the host computer asks for distance readings
                 print("Waiting for frames from camera...")
                 frames = pipeline.wait_for_frames()
                 #align frames
@@ -184,9 +222,6 @@ def main():
                     print("waiting...")
                     continue
                 print ("Got frames!")
-	      
-		
-	#Get the distance readings from realsense camera
                 data = data.decode('utf-8')
                 chars = len(data)-4
                 num_points = (data[4])
@@ -196,59 +231,48 @@ def main():
                 print("SENDING TO COMPUTER")
                 conn.send(str.encode(dist_data))
                 print("DATA SENT TO COMPUTER")
+
             elif data == b'tag':
-				#print("Waiting for frames from camera...")
+			# Case where the host computer asks for tag information in the RGB stream
                 frames = pipeline.wait_for_frames()
-                    #align frames
+                #align frames
                 aligned_frames = align.process(frames)
                 color_frame = aligned_frames.get_color_frame()
                 depth_frame = aligned_frames.get_depth_frame()
 
+				#Get the camera parameters from the RealSense
                 profile = pipeline.get_active_profile()
                 rgb_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
                 rgb_intrinsics = rgb_profile.get_intrinsics()
-                print(rgb_intrinsics)
+
                 params = [rgb_intrinsics.fx, rgb_intrinsics.fy, 0, 0]
                 if not color_frame or not depth_frame:
                     print("waiting...")
                     continue
                 print ("Got frames!")
-                #get tag information from realsense camera
+
+                #Call get_tag function to get the tag information from the camera
                 tag_data = get_tag(color_frame, depth_frame, params)
                 print("Sending data to computer...")
                 conn.send(str.encode(tag_data))
                 print("Data sent!")
-            elif data == b'color':
 
+            elif data == b'color':
+			# Case where the host computer asks the current image from the camera
                 frames = pipeline.wait_for_frames()
                 aligned_frames = align.process(frames)
                 color_frame = aligned_frames.get_color_frame()
                 color_image = np.asanyarray(color_frame.get_data())
                 pil_image = Image.fromarray(color_image)
+				#Convert to grayscale image before sending to host computer
                 gray = np.array(pil_image.convert('L'))
-                print(gray.shape)
+
                 for i in range(480):
                     for j in range(640): 
                          conn.send(gray[i, j])
 
-            elif data == b'depth':
-                frames = pipeline.wait_for_frames()
-                aligned_frames = align.process(frames)
-                depth_frame = aligned_frames.get_depth_frame()
-               # depth_image = np.array(depth_frame.get_data())
-               # print(depth_image.shape)
-                to_send = ""
-                for i in range(480):
-                     
-                     for j in range(640):
-                         to_send += str(int(1000*depth_frame.get_distance(i, j)))
-  #                       print(int(1000*depth_frame.get_distance(i, j)))
-                         to_send +=" "
-                
-                conn.send(str.encode(to_send))
-
-                print("Done sending depth image")
             else: 
+			# Case where the host computer command is meant for the iRobot
 		        #write data to port
                 send_message(data, ser_port, serialLock)
                 print ("data sent to the robot")
