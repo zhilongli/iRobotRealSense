@@ -155,7 +155,7 @@ def get_tag(color_frame, depth_frame, params):
 	accordingly. """
 def main():
 	# set the static IP address of this Python server
-    TCP_IP = '199.168.1.100'
+    TCP_IP = socket.gethostbyname(socket.gethostname())
     TCP_PORT = 8865
     BUFFER_SIZE = 128
     debug = False
